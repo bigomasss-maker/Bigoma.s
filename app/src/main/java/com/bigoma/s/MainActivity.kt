@@ -98,8 +98,8 @@ class MainActivity : AppCompatActivity() {
             )
             isLocationComponentEnabled = true
             cameraMode = CameraMode.TRACKING
+            zoomWhileTracking(16.0)
         }
-        m.cameraPosition = CameraPosition.Builder().zoom(16.0).build()
     }
 
     override fun onStart() { super.onStart(); mapView.onStart() }

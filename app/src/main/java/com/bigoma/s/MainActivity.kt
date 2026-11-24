@@ -93,9 +93,10 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             .build()
-        HttpRequestUtil.setOkHttpClient(client)
 
+        // MapLibre igomba gutangira mbere ya byose
         MapLibre.getInstance(this)
+        HttpRequestUtil.setOkHttpClient(client)
         setContentView(R.layout.activity_main)
 
         tvStatus = findViewById(R.id.tvStatus)

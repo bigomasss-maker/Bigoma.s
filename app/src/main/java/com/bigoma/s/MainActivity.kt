@@ -9,16 +9,23 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import org.json.JSONObject
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.location.LocationComponentActivationOptions
 import org.maplibre.android.location.modes.CameraMode
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
 import org.maplibre.android.module.http.HttpRequestUtil
 import org.maplibre.android.offline.OfflineManager
 import org.maplibre.android.offline.OfflineRegion
@@ -30,6 +37,8 @@ import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.RasterLayer
 import org.maplibre.android.style.sources.RasterSource
 import org.maplibre.android.style.sources.TileSet
+import java.io.File
+import java.io.IOException
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.floor
@@ -43,13 +52,14 @@ class MainActivity : AppCompatActivity() {
         const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
         const val MAX_ZOOM = 14.0
         // Amategeko ya OpenFreeMap: tiles 3000 na 50 MB kuri buri gukuramo.
-        // Dukoresha imipaka mito kugira ngo tubungabunge umutekano.
         const val MAX_TILES = 1500L
         const val MAX_BYTES = 45_000_000L
+        val HOME: LatLng = LatLng(-3.3822, 29.3644) // Bujumbura
     }
 
     private lateinit var mapView: MapView
     private lateinit var tvStatus: TextView
+    private lateinit var http: OkHttpClient
     private var map: MapLibreMap? = null
     private var satelliteOn = false
 
@@ -80,7 +90,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Ibyifuzo 4 gusa icyarimwe, kandi app yiyita izina ryihariye
-        val client = OkHttpClient.Builder()
+        http = OkHttpClient.Builder()
             .dispatcher(Dispatcher().apply {
                 maxRequests = 4
                 maxRequestsPerHost = 4
@@ -88,7 +98,7 @@ class MainActivity : AppCompatActivity() {
             .addInterceptor { chain ->
                 chain.proceed(
                     chain.request().newBuilder()
-                        .header("User-Agent", "BigomaS/0.2 (Android offline map app)")
+                        .header("User-Agent", "BigomaS/0.3 (Android offline map app)")
                         .build()
                 )
             }
@@ -96,7 +106,7 @@ class MainActivity : AppCompatActivity() {
 
         // MapLibre igomba gutangira mbere ya byose
         MapLibre.getInstance(this)
-        HttpRequestUtil.setOkHttpClient(client)
+        HttpRequestUtil.setOkHttpClient(http)
         setContentView(R.layout.activity_main)
 
         tvStatus = findViewById(R.id.tvStatus)
@@ -104,21 +114,12 @@ class MainActivity : AppCompatActivity() {
         mapView.onCreate(savedInstanceState)
         mapView.getMapAsync { m ->
             map = m
+            // Gutangirira ku isi yose (globe)
             m.cameraPosition = CameraPosition.Builder()
-                .target(LatLng(-3.3822, 29.3644))
-                .zoom(12.0)
+                .target(HOME)
+                .zoom(1.5)
                 .build()
-            m.setStyle(STYLE_URL) { style ->
-                // Satellite (online gusa), ihishwa hejuru ya map
-                val tiles = TileSet(
-                    "2.2.0",
-                    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                )
-                style.addSource(RasterSource("sat", tiles, 256))
-                val layer = RasterLayer("sat-layer", "sat")
-                layer.setProperties(PropertyFactory.visibility(Property.NONE))
-                style.addLayer(layer)
-            }
+            loadStyle(m)
         }
 
         findViewById<Button>(R.id.btnSatellite).setOnClickListener { toggleSatellite() }
@@ -129,6 +130,65 @@ class MainActivity : AppCompatActivity() {
     private fun show(text: String) {
         tvStatus.text = text
         tvStatus.visibility = View.VISIBLE
+    }
+
+    // ---------- Style (globe) ----------
+    // Dukura style ya OpenFreeMap, tukayibika muri telefone (kugira ngo ikore offline),
+    // hanyuma tukongeramo "projection: globe".
+
+    private fun loadStyle(m: MapLibreMap) {
+        val cache = File(filesDir, "style_liberty.json")
+        http.newCall(Request.Builder().url(STYLE_URL).build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                val cached = if (cache.exists()) cache.readText() else null
+                runOnUiThread { applyStyle(m, cached) }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val body = response.use { if (it.isSuccessful) it.body.string() else null }
+                if (body != null) {
+                    try { cache.writeText(body) } catch (_: Exception) {}
+                }
+                val json = body ?: (if (cache.exists()) cache.readText() else null)
+                runOnUiThread { applyStyle(m, json) }
+            }
+        })
+    }
+
+    private fun applyStyle(m: MapLibreMap, json: String?) {
+        var builder = Style.Builder().fromUri(STYLE_URL)
+        if (json != null) {
+            try {
+                val withGlobe = JSONObject(json)
+                    .put("projection", JSONObject().put("type", "globe"))
+                    .toString()
+                builder = Style.Builder().fromJson(withGlobe)
+            } catch (_: Exception) {
+                // niba byanze, dukoresha style isanzwe
+            }
+        }
+        m.setStyle(builder) { style ->
+            addSatellite(style)
+            // Kuva ku isi ujya ku mujyi
+            m.animateCamera(
+                CameraUpdateFactory.newCameraPosition(
+                    CameraPosition.Builder().target(HOME).zoom(12.0).build()
+                ),
+                5000
+            )
+        }
+    }
+
+    private fun addSatellite(style: Style) {
+        val tiles = TileSet(
+            "2.2.0",
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        )
+        style.addSource(RasterSource("sat", tiles, 256))
+        val layer = RasterLayer("sat-layer", "sat")
+        layer.setProperties(PropertyFactory.visibility(Property.NONE))
+        style.addLayer(layer)
+        satelliteOn = false
     }
 
     private fun toggleSatellite() {

@@ -147,7 +147,7 @@ class MainActivity : AppCompatActivity() {
             override fun onResponse(call: Call, response: Response) {
                 val body = response.use { if (it.isSuccessful) it.body.string() else null }
                 if (body != null) {
-                    try { cache.writeText(body) } catch (_: Exception) {}
+                    try { cache.writeText(body) } catch (ex: Exception) {}
                 }
                 val json = body ?: (if (cache.exists()) cache.readText() else null)
                 runOnUiThread { applyStyle(m, json) }
@@ -163,7 +163,7 @@ class MainActivity : AppCompatActivity() {
                     .put("projection", JSONObject().put("type", "globe"))
                     .toString()
                 builder = Style.Builder().fromJson(withGlobe)
-            } catch (_: Exception) {
+            } catch (ex: Exception) {
                 // niba byanze, dukoresha style isanzwe
             }
         }

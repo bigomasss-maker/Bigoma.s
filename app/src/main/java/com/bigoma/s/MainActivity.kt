@@ -145,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                val body = response.use { if (it.isSuccessful) it.body.string() else null }
+                                val body = response.use { if (it.isSuccessful) it.body?.string() else null }
                 if (body != null) {
                     try { cache.writeText(body) } catch (ex: Exception) {}
                 }

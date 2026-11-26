@@ -98,4 +98,66 @@
             android:layout_height="wrap_content"
             android:text="Aho ndi" />
     </LinearLayout>
+
+    <!-- Akadirisha ko kuyobora: aho ugiye, intera, urutonde rw'aho uhindukira -->
+    <LinearLayout
+        android:id="@+id/navPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="150dp"
+        android:background="@drawable/bg_search"
+        android:elevation="8dp"
+        android:orientation="vertical"
+        android:padding="18dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tvNavTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:textColor="#202124"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <ScrollView
+            android:id="@+id/scrollSteps"
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvNavSteps"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#3C4043"
+                android:textSize="14sp" />
+        </ScrollView>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnRoute"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Yobora" />
+
+            <Button
+                android:id="@+id/btnCancelNav"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Hagarika" />
+        </LinearLayout>
+    </LinearLayout>
 </FrameLayout>

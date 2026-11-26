@@ -4,17 +4,23 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Dispatcher
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
@@ -59,6 +65,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var mapView: MapView
     private lateinit var tvStatus: TextView
+    private lateinit var etSearch: EditText
+    private lateinit var btnAccount: TextView
     private lateinit var http: OkHttpClient
     private var map: MapLibreMap? = null
     private var satelliteOn = false
@@ -98,7 +106,7 @@ class MainActivity : AppCompatActivity() {
             .addInterceptor { chain ->
                 chain.proceed(
                     chain.request().newBuilder()
-                        .header("User-Agent", "BigomaS/0.3 (Android offline map app)")
+                        .header("User-Agent", "BigomaS/0.5 (Android offline map app)")
                         .build()
                 )
             }
@@ -110,11 +118,12 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         tvStatus = findViewById(R.id.tvStatus)
+        etSearch = findViewById(R.id.etSearch)
+        btnAccount = findViewById(R.id.btnAccount)
         mapView = findViewById(R.id.mapView)
         mapView.onCreate(savedInstanceState)
         mapView.getMapAsync { m ->
             map = m
-            // Gutangirira ku isi yose (globe)
             m.cameraPosition = CameraPosition.Builder()
                 .target(HOME)
                 .zoom(1.5)
@@ -125,6 +134,22 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnSatellite).setOnClickListener { toggleSatellite() }
         findViewById<Button>(R.id.btnLocate).setOnClickListener { requestLocation() }
         findViewById<Button>(R.id.btnDownload).setOnClickListener { startDownload() }
+
+        // Gushakisha: wandika hanyuma ukande Enter / ikirahure kuri keyboard
+        etSearch.setOnEditorActionListener { v, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(v.windowToken, 0)
+                searchPlace(v.text.toString())
+                true
+            } else {
+                false
+            }
+        }
+
+        // Konti: akagati kerekana inyuguti ya mbere y'izina
+        updateAvatar()
+        btnAccount.setOnClickListener { editProfile() }
     }
 
     private fun show(text: String) {
@@ -132,9 +157,86 @@ class MainActivity : AppCompatActivity() {
         tvStatus.visibility = View.VISIBLE
     }
 
-    // ---------- Style (globe) ----------
-    // Dukura style ya OpenFreeMap, tukayibika muri telefone (kugira ngo ikore offline),
-    // hanyuma tukongeramo "projection: globe".
+    // ---------- Konti (izina rigumye muri telefone gusa) ----------
+
+    private fun profileName(): String {
+        return getSharedPreferences("profile", MODE_PRIVATE).getString("name", "") ?: ""
+    }
+
+    private fun updateAvatar() {
+        val name = profileName().trim()
+        val letter = if (name.isNotEmpty()) name[0].uppercaseChar() else 'B'
+        btnAccount.text = letter.toString()
+    }
+
+    private fun editProfile() {
+        val input = EditText(this)
+        input.hint = "Izina ryawe"
+        input.setText(profileName())
+        AlertDialog.Builder(this)
+            .setTitle("Konti yawe")
+            .setMessage("Andika izina ryawe. Rizigamwa muri telefone gusa.")
+            .setView(input)
+            .setPositiveButton("Bika") { _, _ ->
+                getSharedPreferences("profile", MODE_PRIVATE)
+                    .edit().putString("name", input.text.toString().trim()).apply()
+                updateAvatar()
+            }
+            .setNegativeButton("Hagarika", null)
+            .show()
+    }
+
+    // ---------- Gushakisha ahantu (bisaba internet) ----------
+
+    private fun searchPlace(query: String) {
+        val q = query.trim()
+        if (q.isEmpty()) return
+        show("Gushakisha...")
+        val url = HttpUrl.Builder()
+            .scheme("https")
+            .host("nominatim.openstreetmap.org")
+            .addPathSegment("search")
+            .addQueryParameter("q", q)
+            .addQueryParameter("format", "json")
+            .addQueryParameter("limit", "1")
+            .build()
+        http.newCall(Request.Builder().url(url).build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread { show("Nta internet. Gushakisha bisaba internet.") }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val body = response.use { if (it.isSuccessful) it.body?.string() else null }
+                runOnUiThread { handleSearchResult(body) }
+            }
+        })
+    }
+
+    private fun handleSearchResult(body: String?) {
+        val m = map ?: return
+        if (body == null) {
+            show("Gushakisha vyanse. Ongera ugerageze.")
+            return
+        }
+        try {
+            val arr = JSONArray(body)
+            if (arr.length() == 0) {
+                show("Nta kintu cabonetse.")
+                return
+            }
+            val first = arr.getJSONObject(0)
+            val lat = first.getString("lat").toDouble()
+            val lon = first.getString("lon").toDouble()
+            val name = first.optString("display_name", "")
+            m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 15.0), 1500)
+            show(name.take(80))
+        } catch (ex: Exception) {
+            show("Gushakisha vyanse. Ongera ugerageze.")
+        }
+    }
+
+    // ---------- Style ----------
+    // Dukura style ya OpenFreeMap, tukayibika muri telefone (kugira ngo ikore offline).
 
     private fun loadStyle(m: MapLibreMap) {
         val cache = File(filesDir, "style_liberty.json")
@@ -145,7 +247,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                                val body = response.use { if (it.isSuccessful) it.body?.string() else null }
+                val body = response.use { if (it.isSuccessful) it.body?.string() else null }
                 if (body != null) {
                     try { cache.writeText(body) } catch (ex: Exception) {}
                 }

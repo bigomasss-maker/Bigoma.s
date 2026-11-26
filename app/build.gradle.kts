@@ -15,8 +15,8 @@ android {
         versionName = "0.7"
     }
 
-    // Urufunguzo gihamye: dufata idosiye iyo ari yo yose yitwa *.keystore muri folder app
-    val ksFile = projectDir.listFiles(java.io.FileFilter { f -> f.extension == "keystore" })?.firstOrNull()
+    // Urufunguzo gihamye: dufata idosiye yitwa *.keystore muri folder app
+    val ksFile = projectDir.listFiles()?.firstOrNull { it.extension == "keystore" }
     signingConfigs {
         create("bigoma") {
             if (ksFile != null) {

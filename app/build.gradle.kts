@@ -11,8 +11,28 @@ android {
         applicationId = "com.bigoma.maps"
         minSdk = 24
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.6-globe"
+        versionCode = 7
+        versionName = "0.7"
+    }
+
+    // Urufunguzo gihamye: dufata idosiye iyo ari yo yose yitwa *.keystore muri folder app
+    val ksFile = projectDir.listFiles(java.io.FileFilter { f -> f.extension == "keystore" })?.firstOrNull()
+    signingConfigs {
+        create("bigoma") {
+            if (ksFile != null) {
+                storeFile = ksFile
+                storePassword = "bigoma123"
+                keyAlias = "bigoma"
+                keyPassword = "bigoma123"
+            }
+        }
+    }
+    buildTypes {
+        getByName("debug") {
+            if (ksFile != null) {
+                signingConfig = signingConfigs.getByName("bigoma")
+            }
+        }
     }
 
     compileOptions {

@@ -8,11 +8,11 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.bigoma.s"
+        applicationId = "com.bigoma.maps"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 6
+        versionName = "0.6-globe"
     }
 
     compileOptions {
@@ -30,6 +30,6 @@ kotlin {
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("org.maplibre.gl:android-sdk:11.5.2")
+    implementation("org.maplibre.gl:android-sdk:13.7.0-pre-globe.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

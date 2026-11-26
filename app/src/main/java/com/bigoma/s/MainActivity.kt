@@ -3,6 +3,8 @@ package com.bigoma.s
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -38,18 +40,24 @@ import org.maplibre.android.offline.OfflineRegion
 import org.maplibre.android.offline.OfflineRegionError
 import org.maplibre.android.offline.OfflineRegionStatus
 import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition
+import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.RasterLayer
+import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.android.style.sources.RasterSource
 import org.maplibre.android.style.sources.TileSet
 import java.io.File
 import java.io.IOException
+import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.tan
+
+data class Place(val name: String, val lat: Double, val lon: Double)
 
 class MainActivity : AppCompatActivity() {
 
@@ -60,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         // Amategeko ya OpenFreeMap: tiles 3000 na 50 MB kuri buri gukuramo.
         const val MAX_TILES = 1500L
         const val MAX_BYTES = 45_000_000L
+        const val EMPTY_FC = "{\"type\":\"FeatureCollection\",\"features\":[]}"
         val HOME: LatLng = LatLng(-3.3822, 29.3644) // Bujumbura
     }
 
@@ -67,13 +76,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var etSearch: EditText
     private lateinit var btnAccount: TextView
+    private lateinit var navPanel: View
+    private lateinit var tvNavTitle: TextView
+    private lateinit var tvNavSteps: TextView
+    private lateinit var scrollSteps: View
+    private lateinit var btnRoute: Button
+    private lateinit var btnCancelNav: Button
     private lateinit var http: OkHttpClient
     private var map: MapLibreMap? = null
     private var satelliteOn = false
+    private var destination: LatLng? = null
+    private var locationActive = false
+    private var pendingAfterPermission: (() -> Unit)? = null
+    private val ui = Handler(Looper.getMainLooper())
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) showMyLocation()
+            val next = pendingAfterPermission
+            pendingAfterPermission = null
+            if (granted) {
+                if (next != null) next() else showMyLocation()
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -97,7 +120,8 @@ class MainActivity : AppCompatActivity() {
             android.os.Process.killProcess(android.os.Process.myPid())
         }
 
-        // Ibyifuzo 4 gusa icyarimwe, kandi app yiyita izina ryihariye
+        // Ibyifuzo 4 gusa icyarimwe. App yiyita izina ryihariye n'aho kuyisanga
+        // (ibyo Nominatim na OpenFreeMap bisaba).
         http = OkHttpClient.Builder()
             .dispatcher(Dispatcher().apply {
                 maxRequests = 4
@@ -106,7 +130,10 @@ class MainActivity : AppCompatActivity() {
             .addInterceptor { chain ->
                 chain.proceed(
                     chain.request().newBuilder()
-                        .header("User-Agent", "BigomaS/0.5 (Android offline map app)")
+                        .header(
+                            "User-Agent",
+                            "BigomaS/0.9 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
+                        )
                         .build()
                 )
             }
@@ -120,6 +147,12 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         etSearch = findViewById(R.id.etSearch)
         btnAccount = findViewById(R.id.btnAccount)
+        navPanel = findViewById(R.id.navPanel)
+        tvNavTitle = findViewById(R.id.tvNavTitle)
+        tvNavSteps = findViewById(R.id.tvNavSteps)
+        scrollSteps = findViewById(R.id.scrollSteps)
+        btnRoute = findViewById(R.id.btnRoute)
+        btnCancelNav = findViewById(R.id.btnCancelNav)
         mapView = findViewById(R.id.mapView)
         mapView.onCreate(savedInstanceState)
         mapView.getMapAsync { m ->
@@ -128,12 +161,19 @@ class MainActivity : AppCompatActivity() {
                 .target(HOME)
                 .zoom(1.5)
                 .build()
+            // Kanda igihe kirekire ku ikarita kugira ngo uhitemo aho ugiye
+            m.addOnMapLongClickListener { point ->
+                setDestination(point, null)
+                true
+            }
             loadStyle(m)
         }
 
         findViewById<Button>(R.id.btnSatellite).setOnClickListener { toggleSatellite() }
         findViewById<Button>(R.id.btnLocate).setOnClickListener { requestLocation() }
         findViewById<Button>(R.id.btnDownload).setOnClickListener { startDownload() }
+        btnRoute.setOnClickListener { startRoute() }
+        btnCancelNav.setOnClickListener { cancelNav() }
 
         // Gushakisha: wandika hanyuma ukande Enter / ikirahure kuri keyboard
         etSearch.setOnEditorActionListener { v, actionId, _ ->
@@ -187,52 +227,384 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Gushakisha ahantu (bisaba internet) ----------
+    // Banza Nominatim (OpenStreetMap); nimba nta kintu itanze, tugerageza Photon.
+    // Iyo hari ibisubizo byinshi, urahitamo muri urutonde.
 
     private fun searchPlace(query: String) {
         val q = query.trim()
         if (q.isEmpty()) return
         show("Gushakisha...")
-        val url = HttpUrl.Builder()
+        searchNominatim(q) { results, err1 ->
+            if (results.isNotEmpty()) {
+                showResults(results)
+            } else {
+                searchPhoton(q) { results2, err2 ->
+                    if (results2.isNotEmpty()) {
+                        showResults(results2)
+                    } else {
+                        show(err2 ?: err1 ?: "Nta kintu cabonetse. Gerageza: izina ry'umuhanda + umujyi.")
+                    }
+                }
+            }
+        }
+    }
+
+    // Iyo ikarita yegereye (zoom 8+), dukunda ibisubizo biri hafi aho urimo
+    private fun searchBias(): LatLngBounds? {
+        val m = map ?: return null
+        if (m.cameraPosition.zoom < 8.0) return null
+        return m.projection.visibleRegion.latLngBounds
+    }
+
+    private fun getText(url: HttpUrl, done: (String?, String?) -> Unit) {
+        http.newCall(Request.Builder().url(url).build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread { done(null, "Nta internet. Gushakisha bisaba internet.") }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val code = response.code
+                val body = response.use { if (it.isSuccessful) it.body?.string() else null }
+                runOnUiThread {
+                    done(body, if (body == null) "Gushakisha vyanse (HTTP $code)." else null)
+                }
+            }
+        })
+    }
+
+    private fun searchNominatim(q: String, done: (List<Place>, String?) -> Unit) {
+        val b = HttpUrl.Builder()
             .scheme("https")
             .host("nominatim.openstreetmap.org")
             .addPathSegment("search")
             .addQueryParameter("q", q)
             .addQueryParameter("format", "json")
-            .addQueryParameter("limit", "1")
-            .build()
+            .addQueryParameter("limit", "5")
+        val bounds = searchBias()
+        if (bounds != null) {
+            b.addQueryParameter(
+                "viewbox",
+                String.format(
+                    Locale.US, "%.5f,%.5f,%.5f,%.5f",
+                    bounds.longitudeWest, bounds.latitudeNorth,
+                    bounds.longitudeEast, bounds.latitudeSouth
+                )
+            )
+        }
+        getText(b.build()) { body, err ->
+            done(if (body != null) parseNominatim(body) else emptyList(), err)
+        }
+    }
+
+    private fun searchPhoton(q: String, done: (List<Place>, String?) -> Unit) {
+        val b = HttpUrl.Builder()
+            .scheme("https")
+            .host("photon.komoot.io")
+            .addPathSegment("api")
+            .addQueryParameter("q", q)
+            .addQueryParameter("limit", "5")
+        val m = map
+        if (m != null && m.cameraPosition.zoom >= 8.0) {
+            val t = m.cameraPosition.target
+            if (t != null) {
+                b.addQueryParameter("lat", String.format(Locale.US, "%.5f", t.latitude))
+                b.addQueryParameter("lon", String.format(Locale.US, "%.5f", t.longitude))
+            }
+        }
+        getText(b.build()) { body, err ->
+            done(if (body != null) parsePhoton(body) else emptyList(), err)
+        }
+    }
+
+    private fun parseNominatim(body: String): List<Place> {
+        val out = ArrayList<Place>()
+        try {
+            val arr = JSONArray(body)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(
+                    Place(
+                        o.optString("display_name", ""),
+                        o.getString("lat").toDouble(),
+                        o.getString("lon").toDouble()
+                    )
+                )
+            }
+        } catch (ex: Exception) {
+            // nta kintu
+        }
+        return out
+    }
+
+    private fun parsePhoton(body: String): List<Place> {
+        val out = ArrayList<Place>()
+        try {
+            val feats = JSONObject(body).getJSONArray("features")
+            for (i in 0 until feats.length()) {
+                val f = feats.getJSONObject(i)
+                val c = f.getJSONObject("geometry").getJSONArray("coordinates")
+                out.add(
+                    Place(
+                        photonName(f.getJSONObject("properties")),
+                        c.getDouble(1),
+                        c.getDouble(0)
+                    )
+                )
+            }
+        } catch (ex: Exception) {
+            // nta kintu
+        }
+        return out
+    }
+
+    private fun photonName(p: JSONObject): String {
+        val parts = ArrayList<String>()
+        val name = p.optString("name")
+        if (name.isNotEmpty()) parts.add(name)
+        val street = p.optString("street")
+        val hn = p.optString("housenumber")
+        if (street.isNotEmpty()) parts.add(if (hn.isNotEmpty()) "$hn $street" else street)
+        for (k in listOf("district", "city", "state", "country")) {
+            val v = p.optString(k)
+            if (v.isNotEmpty() && !parts.contains(v)) parts.add(v)
+        }
+        return parts.joinToString(", ")
+    }
+
+    private fun showResults(list: List<Place>) {
+        tvStatus.visibility = View.GONE
+        if (list.size == 1) {
+            goTo(list[0])
+            return
+        }
+        val names = list.map { it.name.take(90) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Hitamo ahantu")
+            .setItems(names) { _, which -> goTo(list[which]) }
+            .setNegativeButton("Hagarika", null)
+            .show()
+    }
+
+    private fun goTo(p: Place) {
+        val m = map ?: return
+        m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.lat, p.lon), 15.0), 1500)
+        setDestination(LatLng(p.lat, p.lon), p.name.take(80))
+    }
+
+    // ---------- Kuyobora (online, binyuze kuri OSRM) ----------
+
+    private fun setGeo(id: String, json: String) {
+        val src = map?.style?.getSourceAs<GeoJsonSource>(id)
+        src?.setGeoJson(json)
+    }
+
+    private fun pointJson(p: LatLng): String {
+        return String.format(
+            Locale.US,
+            "{\"type\":\"Feature\",\"properties\":{},\"geometry\":{\"type\":\"Point\",\"coordinates\":[%.6f,%.6f]}}",
+            p.longitude, p.latitude
+        )
+    }
+
+    private fun addRouteLayers(style: Style) {
+        style.addSource(GeoJsonSource("route-src", EMPTY_FC))
+        style.addSource(GeoJsonSource("dest-src", EMPTY_FC))
+        style.addLayer(
+            LineLayer("route-layer", "route-src").withProperties(
+                PropertyFactory.lineColor("#1A73E8"),
+                PropertyFactory.lineWidth(6f),
+                PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
+            )
+        )
+        style.addLayer(
+            CircleLayer("dest-layer", "dest-src").withProperties(
+                PropertyFactory.circleRadius(9f),
+                PropertyFactory.circleColor("#D93025"),
+                PropertyFactory.circleStrokeColor("#FFFFFF"),
+                PropertyFactory.circleStrokeWidth(3f)
+            )
+        )
+    }
+
+    private fun setDestination(p: LatLng, label: String?) {
+        destination = p
+        setGeo("route-src", EMPTY_FC)
+        setGeo("dest-src", pointJson(p))
+        navPanel.visibility = View.VISIBLE
+        tvNavTitle.text = label
+            ?: String.format(Locale.US, "Aho wahisemo (%.4f, %.4f)", p.latitude, p.longitude)
+        scrollSteps.visibility = View.GONE
+        btnRoute.visibility = View.VISIBLE
+        btnRoute.isEnabled = true
+    }
+
+    private fun cancelNav() {
+        destination = null
+        setGeo("route-src", EMPTY_FC)
+        setGeo("dest-src", EMPTY_FC)
+        navPanel.visibility = View.GONE
+        tvStatus.visibility = View.GONE
+    }
+
+    private fun startRoute() {
+        val dest = destination ?: return
+        btnRoute.isEnabled = false
+        show("Gushaka aho uri (GPS)...")
+        whenLocationReady { from -> fetchRoute(from, dest) }
+    }
+
+    private fun routeFailed(msg: String) {
+        btnRoute.isEnabled = true
+        show(msg)
+    }
+
+    private fun whenLocationReady(onReady: (LatLng) -> Unit) {
+        val granted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            pendingAfterPermission = { whenLocationReady(onReady) }
+            permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            return
+        }
+        activateLocation(false)
+        pollLocation(onReady, 0)
+    }
+
+    private fun pollLocation(onReady: (LatLng) -> Unit, attempt: Int) {
+        val loc: android.location.Location? = try {
+            map?.locationComponent?.lastKnownLocation
+        } catch (ex: Exception) {
+            null
+        }
+        if (loc != null) {
+            onReady(LatLng(loc.latitude, loc.longitude))
+            return
+        }
+        if (attempt >= 15) {
+            routeFailed("GPS ntiraboneka. Fungura Location, uve hanze, hanyuma ugerageze.")
+            return
+        }
+        ui.postDelayed({ pollLocation(onReady, attempt + 1) }, 1500)
+    }
+
+    private fun fetchRoute(from: LatLng, to: LatLng) {
+        show("Gushaka inzira...")
+        val url = String.format(
+            Locale.US,
+            "https://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson&steps=true",
+            from.longitude, from.latitude, to.longitude, to.latitude
+        )
         http.newCall(Request.Builder().url(url).build()).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread { show("Nta internet. Gushakisha bisaba internet.") }
+                runOnUiThread { routeFailed("Nta internet. Kuyobora (online) bisaba internet.") }
             }
 
             override fun onResponse(call: Call, response: Response) {
                 val body = response.use { if (it.isSuccessful) it.body?.string() else null }
-                runOnUiThread { handleSearchResult(body) }
+                runOnUiThread { handleRoute(body) }
             }
         })
     }
 
-    private fun handleSearchResult(body: String?) {
+    private fun handleRoute(body: String?) {
+        btnRoute.isEnabled = true
         val m = map ?: return
         if (body == null) {
-            show("Gushakisha vyanse. Ongera ugerageze.")
+            show("Inzira ntiyabonetse. Ongera ugerageze.")
             return
         }
         try {
-            val arr = JSONArray(body)
-            if (arr.length() == 0) {
-                show("Nta kintu cabonetse.")
+            val root = JSONObject(body)
+            if (root.optString("code") != "Ok") {
+                show("Nta nzira yabonetse hagati y'aho uri n'aho ugiye.")
                 return
             }
-            val first = arr.getJSONObject(0)
-            val lat = first.getString("lat").toDouble()
-            val lon = first.getString("lon").toDouble()
-            val name = first.optString("display_name", "")
-            m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 15.0), 1500)
-            show(name.take(80))
+            val route = root.getJSONArray("routes").getJSONObject(0)
+            val geometry = route.getJSONObject("geometry")
+            setGeo(
+                "route-src",
+                "{\"type\":\"Feature\",\"properties\":{},\"geometry\":" + geometry.toString() + "}"
+            )
+
+            val lines = ArrayList<String>()
+            val legs = route.getJSONArray("legs")
+            var n = 1
+            for (l in 0 until legs.length()) {
+                val steps = legs.getJSONObject(l).getJSONArray("steps")
+                for (i in 0 until steps.length()) {
+                    val s = steps.getJSONObject(i)
+                    val man = s.getJSONObject("maneuver")
+                    val text = stepText(
+                        man.optString("type"),
+                        man.optString("modifier"),
+                        s.optString("name"),
+                        s.optDouble("distance", 0.0)
+                    )
+                    lines.add("$n. $text")
+                    n++
+                }
+            }
+
+            tvNavTitle.text = formatDist(route.getDouble("distance")) + "  ·  " +
+                formatDur(route.getDouble("duration"))
+            tvNavSteps.text = lines.joinToString("\n")
+            scrollSteps.visibility = View.VISIBLE
+            btnRoute.visibility = View.GONE
+            tvStatus.visibility = View.GONE
+
+            try {
+                val coords = geometry.getJSONArray("coordinates")
+                val b = LatLngBounds.Builder()
+                for (i in 0 until coords.length()) {
+                    val c = coords.getJSONArray(i)
+                    b.include(LatLng(c.getDouble(1), c.getDouble(0)))
+                }
+                m.animateCamera(CameraUpdateFactory.newLatLngBounds(b.build(), 120), 1200)
+            } catch (ex: Exception) {
+                // niba kwerekana inzira yose binaniwe, ntacyo bitwaye
+            }
         } catch (ex: Exception) {
-            show("Gushakisha vyanse. Ongera ugerageze.")
+            show("Inzira ntishobotse gusomwa.")
         }
+    }
+
+    private fun stepText(type: String, modifier: String, name: String, dist: Double): String {
+        val road = if (name.isNotEmpty()) " kuri $name" else ""
+        val dir = when (modifier) {
+            "left" -> "ibumoso"
+            "right" -> "iburyo"
+            "slight left" -> "ibumoso gato"
+            "slight right" -> "iburyo gato"
+            "sharp left" -> "ibumoso cane"
+            "sharp right" -> "iburyo cane"
+            else -> ""
+        }
+        val action = when (type) {
+            "depart" -> "Tangura$road"
+            "arrive" -> "Wageze iyo ugiye"
+            "roundabout", "rotary", "roundabout turn" -> "Injira mu kizunguruka$road"
+            else -> when {
+                modifier == "uturn" -> "Subira inyuma$road"
+                dir.isNotEmpty() -> "Hindukira $dir$road"
+                else -> "Komeza imbere$road"
+            }
+        }
+        return if (type == "arrive") action else action + " (" + formatDist(dist) + ")"
+    }
+
+    private fun formatDist(meters: Double): String {
+        return if (meters >= 1000.0) {
+            String.format(Locale.US, "%.1f km", meters / 1000.0)
+        } else {
+            "${meters.toInt()} m"
+        }
+    }
+
+    private fun formatDur(seconds: Double): String {
+        val min = maxOf(1, (seconds / 60.0).toInt())
+        return if (min >= 60) "${min / 60} h ${min % 60} min" else "$min min"
     }
 
     // ---------- Style ----------
@@ -271,6 +643,7 @@ class MainActivity : AppCompatActivity() {
         }
         m.setStyle(builder) { style ->
             addSatellite(style)
+            addRouteLayers(style)
             // Kuva ku isi ujya ku mujyi
             m.animateCamera(
                 CameraUpdateFactory.newCameraPosition(
@@ -397,20 +770,33 @@ class MainActivity : AppCompatActivity() {
         val ok = ContextCompat.checkSelfPermission(
             this, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
-        if (ok) showMyLocation() else permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (ok) {
+            showMyLocation()
+        } else {
+            pendingAfterPermission = null
+            permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
+    private fun showMyLocation() {
+        activateLocation(true)
     }
 
     @Suppress("MissingPermission")
-    private fun showMyLocation() {
+    private fun activateLocation(track: Boolean) {
         val m = map ?: return
         val style = m.style ?: return
-        m.locationComponent.apply {
-            activateLocationComponent(
-                LocationComponentActivationOptions.builder(this@MainActivity, style).build()
+        val lc = m.locationComponent
+        if (!locationActive) {
+            lc.activateLocationComponent(
+                LocationComponentActivationOptions.builder(this, style).build()
             )
-            isLocationComponentEnabled = true
-            cameraMode = CameraMode.TRACKING
-            zoomWhileTracking(16.0)
+            lc.isLocationComponentEnabled = true
+            locationActive = true
+        }
+        if (track) {
+            lc.cameraMode = CameraMode.TRACKING
+            lc.zoomWhileTracking(16.0)
         }
     }
 

@@ -11,8 +11,8 @@ android {
         applicationId = "com.bigoma.maps"
         minSdk = 24
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.7"
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "8").toInt()
+        versionName = "0.8"
     }
 
     // Urufunguzo gihamye: dufata idosiye yitwa *.keystore muri folder app

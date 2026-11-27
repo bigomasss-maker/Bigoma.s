@@ -42,6 +42,7 @@ import org.maplibre.android.offline.OfflineRegionError
 import org.maplibre.android.offline.OfflineRegionStatus
 import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition
 import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
@@ -59,7 +60,7 @@ import kotlin.math.ln
 import kotlin.math.tan
 
 // bbox = [south, west, north, east] (ubugari bw'ahantu, bishobora kuba null)
-data class Place(val name: String, val lat: Double, val lon: Double, val bbox: DoubleArray? = null)
+data class Place(val name: String, val lat: Double, val lon: Double, val bbox: DoubleArray? = null, val geo: String? = null)
 
 class MainActivity : AppCompatActivity() {
 
@@ -134,7 +135,7 @@ class MainActivity : AppCompatActivity() {
                     chain.request().newBuilder()
                         .header(
                             "User-Agent",
-                            "BigomaMaps/0.10 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
+                            "BigomaMaps/0.11 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
                         )
                         .build()
                 )
@@ -298,6 +299,8 @@ class MainActivity : AppCompatActivity() {
             .addQueryParameter("q", q)
             .addQueryParameter("format", "json")
             .addQueryParameter("limit", "5")
+            .addQueryParameter("polygon_geojson", "1")
+            .addQueryParameter("polygon_threshold", "0.0005")
         val bounds = searchBias()
         if (bounds != null) {
             b.addQueryParameter(
@@ -351,12 +354,23 @@ class MainActivity : AppCompatActivity() {
                         bb.getString(3).toDouble()
                     )
                 }
+                var geo: String? = null
+                val g = o.optJSONObject("geojson")
+                if (g != null) {
+                    val t = g.optString("type")
+                    if (t == "Polygon" || t == "MultiPolygon" ||
+                        t == "LineString" || t == "MultiLineString"
+                    ) {
+                        geo = g.toString()
+                    }
+                }
                 out.add(
                     Place(
                         o.optString("display_name", ""),
                         o.getString("lat").toDouble(),
                         o.getString("lon").toDouble(),
-                        box
+                        box,
+                        geo
                     )
                 )
             }
@@ -443,6 +457,10 @@ class MainActivity : AppCompatActivity() {
             m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.lat, p.lon), 15.0), 1500)
         }
         setDestination(LatLng(p.lat, p.lon), p.name.take(80))
+        // Erekana umurongo n'ibara ry'ahantu hose (umujyi, province, commune...)
+        if (p.geo != null) {
+            setGeo("area-src", "{\"type\":\"Feature\",\"properties\":{},\"geometry\":" + p.geo + "}")
+        }
     }
 
     // ---------- Kuyobora (online, binyuze kuri OSRM) ----------
@@ -457,6 +475,23 @@ class MainActivity : AppCompatActivity() {
             Locale.US,
             "{\"type\":\"Feature\",\"properties\":{},\"geometry\":{\"type\":\"Point\",\"coordinates\":[%.6f,%.6f]}}",
             p.longitude, p.latitude
+        )
+    }
+
+    private fun addAreaLayers(style: Style) {
+        style.addSource(GeoJsonSource("area-src", EMPTY_FC))
+        style.addLayer(
+            FillLayer("area-fill", "area-src").withProperties(
+                PropertyFactory.fillColor("#1A73E8"),
+                PropertyFactory.fillOpacity(0.18f)
+            )
+        )
+        style.addLayer(
+            LineLayer("area-line", "area-src").withProperties(
+                PropertyFactory.lineColor("#1A73E8"),
+                PropertyFactory.lineWidth(3f),
+                PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
+            )
         )
     }
 
@@ -483,6 +518,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setDestination(p: LatLng, label: String?) {
         destination = p
+        setGeo("area-src", EMPTY_FC)
         setGeo("route-src", EMPTY_FC)
         setGeo("dest-src", pointJson(p))
         navPanel.visibility = View.VISIBLE
@@ -495,6 +531,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun cancelNav() {
         destination = null
+        setGeo("area-src", EMPTY_FC)
         setGeo("route-src", EMPTY_FC)
         setGeo("dest-src", EMPTY_FC)
         navPanel.visibility = View.GONE
@@ -697,6 +734,7 @@ class MainActivity : AppCompatActivity() {
         }
         m.setStyle(builder) { style ->
             addSatellite(style)
+            addAreaLayers(style)
             addRouteLayers(style)
             // Kuva ku isi ujya ku mujyi
             m.animateCamera(

@@ -135,7 +135,7 @@ class MainActivity : AppCompatActivity() {
                     chain.request().newBuilder()
                         .header(
                             "User-Agent",
-                            "BigomaMaps/0.11 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
+                            "BigomaMaps/0.12 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
                         )
                         .build()
                 )
@@ -299,6 +299,7 @@ class MainActivity : AppCompatActivity() {
             .addQueryParameter("q", q)
             .addQueryParameter("format", "json")
             .addQueryParameter("limit", "5")
+            .addQueryParameter("dedupe", "0")
             .addQueryParameter("polygon_geojson", "1")
             .addQueryParameter("polygon_threshold", "0.0005")
         val bounds = searchBias()
@@ -377,7 +378,11 @@ class MainActivity : AppCompatActivity() {
         } catch (ex: Exception) {
             // nta kintu
         }
-        return out
+        // Ibisubizo bifise umurongo w'ahantu (Polygon) bibanza
+        return out.sortedByDescending {
+            val g = it.geo
+            if (g != null && g.contains("Polygon")) 1 else 0
+        }
     }
 
     private fun parsePhoton(body: String): List<Place> {

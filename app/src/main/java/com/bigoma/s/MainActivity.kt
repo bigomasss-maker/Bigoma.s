@@ -41,7 +41,7 @@ import org.maplibre.android.offline.OfflineRegion
 import org.maplibre.android.offline.OfflineRegionError
 import org.maplibre.android.offline.OfflineRegionStatus
 import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition
-import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
@@ -135,7 +135,7 @@ class MainActivity : AppCompatActivity() {
                     chain.request().newBuilder()
                         .header(
                             "User-Agent",
-                            "BigomaMaps/0.12 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
+                            "BigomaMaps/0.13 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
                         )
                         .build()
                 )
@@ -465,6 +465,22 @@ class MainActivity : AppCompatActivity() {
         // Erekana umurongo n'ibara ry'ahantu hose (umujyi, province, commune...)
         if (p.geo != null) {
             setGeo("area-src", "{\"type\":\"Feature\",\"properties\":{},\"geometry\":" + p.geo + "}")
+        } else if (bx != null && (bx[2] - bx[0] > 0.004 || bx[3] - bx[1] > 0.004)) {
+            // Nta murongo nyawo muri OSM: twerekana agasanduku k'ahantu
+            val ring = String.format(
+                Locale.US,
+                "[[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f],[%.6f,%.6f]]",
+                bx[1], bx[0], bx[3], bx[0], bx[3], bx[2], bx[1], bx[2], bx[1], bx[0]
+            )
+            setGeo(
+                "area-src",
+                "{\"type\":\"Feature\",\"properties\":{},\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[" + ring + "]}}"
+            )
+            Toast.makeText(
+                this,
+                "Umurongo nyawo ntiboneka muri OpenStreetMap. Herekanywe agasanduku k'ahantu.",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -511,14 +527,47 @@ class MainActivity : AppCompatActivity() {
                 PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
             )
         )
+        style.addImage("dest-pin", makePinBitmap())
         style.addLayer(
-            CircleLayer("dest-layer", "dest-src").withProperties(
-                PropertyFactory.circleRadius(9f),
-                PropertyFactory.circleColor("#D93025"),
-                PropertyFactory.circleStrokeColor("#FFFFFF"),
-                PropertyFactory.circleStrokeWidth(3f)
+            SymbolLayer("dest-layer", "dest-src").withProperties(
+                PropertyFactory.iconImage("dest-pin"),
+                PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true)
             )
         )
+    }
+
+    // Ikimenyetso c'ahantu (pin) gishushanyijwe n'app ubwayo
+    private fun makePinBitmap(): android.graphics.Bitmap {
+        val d = resources.displayMetrics.density
+        val w = (38 * d).toInt()
+        val h = (52 * d).toInt()
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        val r = w / 2f - 3 * d
+        val cx = w / 2f
+        val cy = r + 3 * d
+        val tri = android.graphics.Path()
+        tri.moveTo(cx - r * 0.9f, cy + r * 0.45f)
+        tri.lineTo(cx, h - 2 * d)
+        tri.lineTo(cx + r * 0.9f, cy + r * 0.45f)
+        tri.close()
+        val stroke = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        stroke.style = android.graphics.Paint.Style.STROKE
+        stroke.strokeWidth = 5 * d
+        stroke.color = android.graphics.Color.WHITE
+        stroke.strokeJoin = android.graphics.Paint.Join.ROUND
+        c.drawCircle(cx, cy, r, stroke)
+        c.drawPath(tri, stroke)
+        val fill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        fill.style = android.graphics.Paint.Style.FILL
+        fill.color = android.graphics.Color.parseColor("#0F766E")
+        c.drawCircle(cx, cy, r, fill)
+        c.drawPath(tri, fill)
+        fill.color = android.graphics.Color.WHITE
+        c.drawCircle(cx, cy, r * 0.42f, fill)
+        return bmp
     }
 
     private fun setDestination(p: LatLng, label: String?) {

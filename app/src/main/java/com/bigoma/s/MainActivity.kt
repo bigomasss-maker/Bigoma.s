@@ -11,6 +11,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -57,7 +58,8 @@ import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.tan
 
-data class Place(val name: String, val lat: Double, val lon: Double)
+// bbox = [south, west, north, east] (ubugari bw'ahantu, bishobora kuba null)
+data class Place(val name: String, val lat: Double, val lon: Double, val bbox: DoubleArray? = null)
 
 class MainActivity : AppCompatActivity() {
 
@@ -132,7 +134,7 @@ class MainActivity : AppCompatActivity() {
                     chain.request().newBuilder()
                         .header(
                             "User-Agent",
-                            "BigomaS/0.9 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
+                            "BigomaMaps/0.10 (Android map app; +https://github.com/bigomasss-maker/Bigoma.s)"
                         )
                         .build()
                 )
@@ -227,22 +229,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Gushakisha ahantu (bisaba internet) ----------
-    // Banza Nominatim (OpenStreetMap); nimba nta kintu itanze, tugerageza Photon.
-    // Iyo hari ibisubizo byinshi, urahitamo muri urutonde.
+    // 1) Nominatim, 2) Photon, 3) niba hari nimero y'inzu itabonetse,
+    // dushakisha umuhanda gusa.
 
     private fun searchPlace(query: String) {
         val q = query.trim()
         if (q.isEmpty()) return
         show("Gushakisha...")
-        searchNominatim(q) { results, err1 ->
-            if (results.isNotEmpty()) {
-                showResults(results)
+        searchNominatim(q) { r1, e1 ->
+            if (r1.isNotEmpty()) {
+                showResults(r1)
             } else {
-                searchPhoton(q) { results2, err2 ->
-                    if (results2.isNotEmpty()) {
-                        showResults(results2)
+                searchPhoton(q) { r2, e2 ->
+                    if (r2.isNotEmpty()) {
+                        showResults(r2)
                     } else {
-                        show(err2 ?: err1 ?: "Nta kintu cabonetse. Gerageza: izina ry'umuhanda + umujyi.")
+                        val stripped = q.replace(Regex("^\\d+[A-Za-z]?\\s*,?\\s*"), "")
+                        if (stripped != q && stripped.length > 2) {
+                            searchNominatim(stripped) { r3, e3 ->
+                                if (r3.isNotEmpty()) {
+                                    Toast.makeText(
+                                        this,
+                                        "Nimero y'inzu ntiyabonetse. Hano ni umuhanda.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    showResults(r3)
+                                } else {
+                                    show(e3 ?: "Nta kintu cabonetse. Gerageza izina ry'umuhanda + umujyi.")
+                                }
+                            }
+                        } else {
+                            show(e2 ?: e1 ?: "Nta kintu cabonetse. Gerageza izina ry'umuhanda + umujyi.")
+                        }
                     }
                 }
             }
@@ -322,11 +340,23 @@ class MainActivity : AppCompatActivity() {
             val arr = JSONArray(body)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
+                var box: DoubleArray? = null
+                val bb = o.optJSONArray("boundingbox")
+                if (bb != null && bb.length() == 4) {
+                    // Nominatim: [south, north, west, east]
+                    box = doubleArrayOf(
+                        bb.getString(0).toDouble(),
+                        bb.getString(2).toDouble(),
+                        bb.getString(1).toDouble(),
+                        bb.getString(3).toDouble()
+                    )
+                }
                 out.add(
                     Place(
                         o.optString("display_name", ""),
                         o.getString("lat").toDouble(),
-                        o.getString("lon").toDouble()
+                        o.getString("lon").toDouble(),
+                        box
                     )
                 )
             }
@@ -343,13 +373,19 @@ class MainActivity : AppCompatActivity() {
             for (i in 0 until feats.length()) {
                 val f = feats.getJSONObject(i)
                 val c = f.getJSONObject("geometry").getJSONArray("coordinates")
-                out.add(
-                    Place(
-                        photonName(f.getJSONObject("properties")),
-                        c.getDouble(1),
-                        c.getDouble(0)
+                val props = f.getJSONObject("properties")
+                var box: DoubleArray? = null
+                val ex = props.optJSONArray("extent")
+                if (ex != null && ex.length() == 4) {
+                    // Photon: [minLon, maxLat, maxLon, minLat]
+                    box = doubleArrayOf(
+                        ex.getDouble(3),
+                        ex.getDouble(0),
+                        ex.getDouble(1),
+                        ex.getDouble(2)
                     )
-                )
+                }
+                out.add(Place(photonName(props), c.getDouble(1), c.getDouble(0), box))
             }
         } catch (ex: Exception) {
             // nta kintu
@@ -385,9 +421,27 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // Niba ahantu ari hanini (umujyi, umuhanda, akarere), twerekana hose.
+    // Niba ari akadomo (inzu), twegera zoom 15.
     private fun goTo(p: Place) {
         val m = map ?: return
-        m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.lat, p.lon), 15.0), 1500)
+        val bx = p.bbox
+        var fitted = false
+        if (bx != null && (bx[2] - bx[0] > 0.004 || bx[3] - bx[1] > 0.004)) {
+            try {
+                val b = LatLngBounds.Builder()
+                    .include(LatLng(bx[0], bx[1]))
+                    .include(LatLng(bx[2], bx[3]))
+                    .build()
+                m.animateCamera(CameraUpdateFactory.newLatLngBounds(b, 100), 1500)
+                fitted = true
+            } catch (ex: Exception) {
+                fitted = false
+            }
+        }
+        if (!fitted) {
+            m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(p.lat, p.lon), 15.0), 1500)
+        }
         setDestination(LatLng(p.lat, p.lon), p.name.take(80))
     }
 

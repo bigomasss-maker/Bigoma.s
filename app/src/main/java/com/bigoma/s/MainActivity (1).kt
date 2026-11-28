@@ -175,7 +175,7 @@ class MainActivity : AppCompatActivity() {
         updateAvatar()
         btnAccount.setOnClickListener { editProfile() }
     }
-
+    internal fun bannerReady(): Boolean = ::banner.isInitialized
     internal fun show(text: String) {
         tvStatus.text = text
         tvStatus.visibility = View.VISIBLE

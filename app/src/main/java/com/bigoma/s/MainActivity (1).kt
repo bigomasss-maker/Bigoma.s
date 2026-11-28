@@ -259,4 +259,3 @@ class MainActivity : AppCompatActivity() {
         if (::mapView.isInitialized) mapView.onSaveInstanceState(outState)
     }
 }
-}

@@ -1,7 +1,8 @@
 
 package com.bigoma.s
 
-import androidx.appcompat.app.AppCompatActivity
+import android.app.Activity
+import android.util.Log
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
@@ -11,23 +12,44 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import org.maplibre.android.geometry.LatLngBounds
-import org.maplibre.android.maps.MapLibreMap
 import java.io.IOException
 import java.util.Locale
 
+// bbox = [south, west, north, east]
+
+data class Place(
+    val name: String,
+    val lat: Double,
+    val lon: Double,
+    val bbox: DoubleArray? = null,
+    val geo: String? = null
+)
+
 class SearchController(
-    private val activity: AppCompatActivity,
+    private val activity: Activity,
     private val http: OkHttpClient,
-    private val map: () -> MapLibreMap?,
+    private val getBounds: () -> LatLngBounds?,
     private val onStatus: (String) -> Unit,
     private val onResults: (List<Place>) -> Unit
 ) {
+
     private var searchGeneration = 0
 
-    private fun isCurrent(id: Int): Boolean {
+    private val calls = mutableListOf<Call>()
+
+    private fun isCurrentSearch(id: Int): Boolean {
         return id == searchGeneration &&
-            !activity.isFinishing &&
-            !activity.isDestroyed
+                !activity.isFinishing &&
+                !activity.isDestroyed
+    }
+
+    fun cancel() {
+        searchGeneration++
+
+        synchronized(calls) {
+            calls.forEach { it.cancel() }
+            calls.clear()
+        }
     }
 
     fun search(query: String) {
@@ -38,82 +60,103 @@ class SearchController(
             return
         }
 
-        val id = ++searchGeneration
+        val searchId = ++searchGeneration
+
+        synchronized(calls) {
+            calls.forEach { it.cancel() }
+            calls.clear()
+        }
+
         onStatus("Gushakisha: $q ...")
 
-        searchNominatim(q) { first, firstError ->
-            if (!isCurrent(id)) return@searchNominatim
+        searchNominatim(q) { r1, e1 ->
 
-            if (first.isNotEmpty()) {
-                onResults(first)
-                return@searchNominatim
-            }
+            if (!isCurrentSearch(searchId)) return@searchNominatim
 
-            searchPhoton(q) { second, secondError ->
-                if (!isCurrent(id)) return@searchPhoton
+            if (r1.isNotEmpty()) {
+                onResults(r1)
+            } else {
 
-                if (second.isNotEmpty()) {
-                    onResults(second)
-                    return@searchPhoton
-                }
+                searchPhoton(q) { r2, e2 ->
 
-                val stripped = q.replace(
-                    Regex("^\\d+[A-Za-z]?\\s*,?\\s*"),
-                    ""
-                )
+                    if (!isCurrentSearch(searchId)) {
+                        return@searchPhoton
+                    }
 
-                if (stripped != q && stripped.length > 2) {
-                    searchNominatim(stripped) { third, thirdError ->
-                        if (!isCurrent(id)) return@searchNominatim
+                    if (r2.isNotEmpty()) {
+                        onResults(r2)
+                    } else {
 
-                        if (third.isNotEmpty()) {
-                            onStatus(
-                                "Nimero y'inzu ntiyabonetse. Hano ni umuhanda."
-                            )
-                            onResults(third)
+                        val stripped = q.replace(
+                            Regex("^\\d+[A-Za-z]?\\s*,?\\s*"),
+                            ""
+                        )
+
+                        if (
+                            stripped != q &&
+                            stripped.length > 2
+                        ) {
+
+                            searchNominatim(stripped) { r3, e3 ->
+
+                                if (!isCurrentSearch(searchId)) {
+                                    return@searchNominatim
+                                }
+
+                                if (r3.isNotEmpty()) {
+
+                                    android.widget.Toast.makeText(
+                                        activity,
+                                        "Nimero y'inzu ntiyabonetse. Hano ni umuhanda.",
+                                        android.widget.Toast.LENGTH_LONG
+                                    ).show()
+
+                                    onResults(r3)
+
+                                } else {
+                                    onStatus(
+                                        e3 ?: "Nta hantu habonetse. Gerageza izina ry'umuhanda n'umujyi."
+                                    )
+                                }
+                            }
+
                         } else {
                             onStatus(
-                                thirdError ?: secondError ?: firstError
+                                e2 ?: e1
                                 ?: "Nta hantu habonetse. Gerageza izina ry'umuhanda n'umujyi."
                             )
                         }
                     }
-                } else {
-                    onStatus(
-                        secondError ?: firstError
-                        ?: "Nta hantu habonetse. Gerageza izina ry'umuhanda n'umujyi."
-                    )
                 }
             }
         }
-    }
-
-    fun cancel() {
-        searchGeneration++
-    }
-
-    private fun searchBias(): LatLngBounds? {
-        val m = map() ?: return null
-
-        if (m.cameraPosition.zoom < 8.0) {
-            return null
-        }
-
-        return m.projection.visibleRegion.latLngBounds
     }
 
     private fun getText(
         url: HttpUrl,
         done: (String?, String?) -> Unit
     ) {
-        http.newCall(
-            Request.Builder().url(url).build()
-        ).enqueue(object : Callback {
+
+        val call = http.newCall(
+            Request.Builder()
+                .url(url)
+                .build()
+        )
+
+        synchronized(calls) {
+            calls.add(call)
+        }
+
+        call.enqueue(object : Callback {
 
             override fun onFailure(
                 call: Call,
                 e: IOException
             ) {
+                synchronized(calls) {
+                    calls.remove(call)
+                }
+
                 activity.runOnUiThread {
                     done(
                         null,
@@ -126,6 +169,11 @@ class SearchController(
                 call: Call,
                 response: Response
             ) {
+
+                synchronized(calls) {
+                    calls.remove(call)
+                }
+
                 val code = response.code
 
                 val body = response.use {
@@ -151,24 +199,26 @@ class SearchController(
     }
 
     private fun searchNominatim(
-        query: String,
+        q: String,
         done: (List<Place>, String?) -> Unit
     ) {
-        val builder = HttpUrl.Builder()
+
+        val b = HttpUrl.Builder()
             .scheme("https")
             .host("nominatim.openstreetmap.org")
             .addPathSegment("search")
-            .addQueryParameter("q", query)
+            .addQueryParameter("q", q)
             .addQueryParameter("format", "json")
             .addQueryParameter("limit", "5")
             .addQueryParameter("dedupe", "0")
             .addQueryParameter("polygon_geojson", "1")
             .addQueryParameter("polygon_threshold", "0.0005")
 
-        val bounds = searchBias()
+        val bounds = getBounds()
 
         if (bounds != null) {
-            builder.addQueryParameter(
+
+            b.addQueryParameter(
                 "viewbox",
                 String.format(
                     Locale.US,
@@ -181,201 +231,225 @@ class SearchController(
             )
         }
 
-        getText(builder.build()) { body, error ->
+        getText(b.build()) { body, err ->
+
             done(
-                if (body != null) parseNominatim(body)
-                else emptyList(),
-                error
+                if (body != null) {
+                    parseNominatim(body)
+                } else {
+                    emptyList()
+                },
+                err
             )
         }
     }
 
     private fun searchPhoton(
-        query: String,
+        q: String,
         done: (List<Place>, String?) -> Unit
     ) {
-        val builder = HttpUrl.Builder()
+
+        val b = HttpUrl.Builder()
             .scheme("https")
             .host("photon.komoot.io")
             .addPathSegment("api")
-            .addQueryParameter("q", query)
+            .addQueryParameter("q", q)
             .addQueryParameter("limit", "5")
 
-        val m = map()
+        val bounds = getBounds()
 
-        if (m != null && m.cameraPosition.zoom >= 8.0) {
-            val target = m.cameraPosition.target
+        if (bounds != null) {
+            val centerLat =
+                (bounds.latitudeNorth + bounds.latitudeSouth) / 2.0
 
-            if (target != null) {
-                builder.addQueryParameter(
-                    "lat",
-                    String.format(
-                        Locale.US,
-                        "%.5f",
-                        target.latitude
-                    )
-                )
+            val centerLon =
+                (bounds.longitudeEast + bounds.longitudeWest) / 2.0
 
-                builder.addQueryParameter(
-                    "lon",
-                    String.format(
-                        Locale.US,
-                        "%.5f",
-                        target.longitude
-                    )
-                )
-            }
+            b.addQueryParameter(
+                "lat",
+                String.format(Locale.US, "%.5f", centerLat)
+            )
+
+            b.addQueryParameter(
+                "lon",
+                String.format(Locale.US, "%.5f", centerLon)
+            )
         }
 
-        getText(builder.build()) { body, error ->
+        getText(b.build()) { body, err ->
+
             done(
-                if (body != null) parsePhoton(body)
-                else emptyList(),
-                error
+                if (body != null) {
+                    parsePhoton(body)
+                } else {
+                    emptyList()
+                },
+                err
             )
         }
     }
 
-    private fun parseNominatim(body: String): List<Place> {
-        val results = ArrayList<Place>()
+    private fun parseNominatim(
+        body: String
+    ): List<Place> {
+
+        val out = ArrayList<Place>()
 
         try {
-            val array = JSONArray(body)
+            val arr = JSONArray(body)
 
-            for (i in 0 until array.length()) {
-                val item = array.getJSONObject(i)
+            for (i in 0 until arr.length()) {
 
-                var bounds: DoubleArray? = null
-                val box = item.optJSONArray("boundingbox")
+                val o = arr.getJSONObject(i)
 
-                if (box != null && box.length() == 4) {
-                    bounds = doubleArrayOf(
-                        box.getString(0).toDouble(),
-                        box.getString(2).toDouble(),
-                        box.getString(1).toDouble(),
-                        box.getString(3).toDouble()
+                var box: DoubleArray? = null
+
+                val bb = o.optJSONArray("boundingbox")
+
+                if (bb != null && bb.length() == 4) {
+
+                    box = doubleArrayOf(
+                        bb.getString(0).toDouble(),
+                        bb.getString(2).toDouble(),
+                        bb.getString(1).toDouble(),
+                        bb.getString(3).toDouble()
                     )
                 }
 
                 var geo: String? = null
-                val geometry = item.optJSONObject("geojson")
 
-                if (geometry != null) {
-                    val type = geometry.optString("type")
+                val g = o.optJSONObject("geojson")
+
+                if (g != null) {
+
+                    val t = g.optString("type")
 
                     if (
-                        type == "Polygon" ||
-                        type == "MultiPolygon" ||
-                        type == "LineString" ||
-                        type == "MultiLineString"
+                        t == "Polygon" ||
+                        t == "MultiPolygon" ||
+                        t == "LineString" ||
+                        t == "MultiLineString"
                     ) {
-                        geo = geometry.toString()
+                        geo = g.toString()
                     }
                 }
 
-                results.add(
+                out.add(
                     Place(
-                        item.optString("display_name", ""),
-                        item.getString("lat").toDouble(),
-                        item.getString("lon").toDouble(),
-                        bounds,
+                        o.optString("display_name", ""),
+                        o.getString("lat").toDouble(),
+                        o.getString("lon").toDouble(),
+                        box,
                         geo
                     )
                 )
             }
-        } catch (e: Exception) {
-            android.util.Log.e(
-                "BigomaSearch",
+
+        } catch (ex: Exception) {
+
+            Log.e(
+                "BigomaMaps",
                 "Nominatim parsing error",
-                e
+                ex
             )
         }
 
-        return results.sortedByDescending {
-            if (it.geo?.contains("Polygon") == true) 1 else 0
+        return out.sortedByDescending {
+            val g = it.geo
+            if (g != null && g.contains("Polygon")) 1 else 0
         }
     }
 
-    private fun parsePhoton(body: String): List<Place> {
-        val results = ArrayList<Place>()
+    private fun parsePhoton(
+        body: String
+    ): List<Place> {
+
+        val out = ArrayList<Place>()
 
         try {
-            val features =
+
+            val feats =
                 JSONObject(body).getJSONArray("features")
 
-            for (i in 0 until features.length()) {
-                val feature = features.getJSONObject(i)
+            for (i in 0 until feats.length()) {
 
-                val coordinates = feature
-                    .getJSONObject("geometry")
+                val f = feats.getJSONObject(i)
+
+                val c = f.getJSONObject("geometry")
                     .getJSONArray("coordinates")
 
-                val properties =
-                    feature.getJSONObject("properties")
+                val props = f.getJSONObject("properties")
 
-                var bounds: DoubleArray? = null
-                val extent = properties.optJSONArray("extent")
+                var box: DoubleArray? = null
 
-                if (extent != null && extent.length() == 4) {
-                    bounds = doubleArrayOf(
-                        extent.getDouble(3),
-                        extent.getDouble(0),
-                        extent.getDouble(1),
-                        extent.getDouble(2)
+                val ex = props.optJSONArray("extent")
+
+                if (ex != null && ex.length() == 4) {
+
+                    box = doubleArrayOf(
+                        ex.getDouble(3),
+                        ex.getDouble(0),
+                        ex.getDouble(1),
+                        ex.getDouble(2)
                     )
                 }
 
-                results.add(
+                out.add(
                     Place(
-                        photonName(properties),
-                        coordinates.getDouble(1),
-                        coordinates.getDouble(0),
-                        bounds
+                        photonName(props),
+                        c.getDouble(1),
+                        c.getDouble(0),
+                        box
                     )
                 )
             }
-        } catch (e: Exception) {
-            android.util.Log.e(
-                "BigomaSearch",
+
+        } catch (ex: Exception) {
+
+            Log.e(
+                "BigomaMaps",
                 "Photon parsing error",
-                e
+                ex
             )
         }
 
-        return results
+        return out
     }
 
-    private fun photonName(properties: JSONObject): String {
+    private fun photonName(p: JSONObject): String {
+
         val parts = ArrayList<String>()
 
-        val name = properties.optString("name")
-        if (name.isNotEmpty()) parts.add(name)
+        val name = p.optString("name")
 
-        val street = properties.optString("street")
-        val houseNumber = properties.optString("housenumber")
+        if (name.isNotEmpty()) {
+            parts.add(name)
+        }
+
+        val street = p.optString("street")
+        val hn = p.optString("housenumber")
 
         if (street.isNotEmpty()) {
+
             parts.add(
-                if (houseNumber.isNotEmpty()) {
-                    "$houseNumber $street"
-                } else {
-                    street
-                }
+                if (hn.isNotEmpty()) "$hn $street"
+                else street
             )
         }
 
         for (
-            key in listOf(
+            k in listOf(
                 "district",
                 "city",
                 "state",
                 "country"
             )
         ) {
-            val value = properties.optString(key)
 
-            if (value.isNotEmpty() && !parts.contains(value)) {
-                parts.add(value)
+            val v = p.optString(k)
+
+            if (v.isNotEmpty() && !parts.contains(v)) {
+                parts.add(v)
             }
         }
 
